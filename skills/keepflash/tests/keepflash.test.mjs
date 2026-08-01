@@ -24,6 +24,15 @@ import {
   writeCredential,
 } from "../scripts/keepflash.mjs";
 
+function createTestToken(label) {
+  return [["kf", "mcp", "live"].join("_"), label, "x".repeat(24)].join(
+    "_",
+  );
+}
+
+const FILE_TEST_TOKEN = createTestToken("fixture");
+const LOGIN_TEST_TOKEN = createTestToken("login");
+
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -87,7 +96,7 @@ test("writes file credentials with user-only permissions", async () => {
   await withTempConfig(async (configHome) => {
     await writeCredential({
       credential: {
-        token: "kf_mcp_live_test_abcdefghijklmnop",
+        token: FILE_TEST_TOKEN,
         baseUrl: "https://keepflash.com",
       },
       configHome,
@@ -126,7 +135,7 @@ test("login polls pending, stores the token, and never prints it", async () => {
       }),
       jsonResponse({ error: "authorization_pending" }, 400),
       jsonResponse({
-        access_token: "kf_mcp_live_abcd_abcdefghijklmnop",
+        access_token: LOGIN_TEST_TOKEN,
         token_type: "Bearer",
         scope: "notes:read",
       }),
@@ -146,7 +155,7 @@ test("login polls pending, stores the token, and never prints it", async () => {
     });
 
     const credential = await readCredential({ configHome });
-    assert.equal(credential.token, "kf_mcp_live_abcd_abcdefghijklmnop");
+    assert.equal(credential.token, LOGIN_TEST_TOKEN);
     assert.match(openedUrl, /code=KF-ABCD-EFGH/);
     assert.match(output.join("\n"), /KF-ABCD-EFGH/);
     assert.equal(output.join("\n").includes(credential.token), false);
@@ -240,8 +249,7 @@ test("parses JSON and SSE MCP results and preserves tool error details", async (
             content: [
               {
                 type: "text",
-                text:
-                  "MCP error -32602: limit expected <= 50 (kf_mcp_live_test_abcdefghijklmnop)",
+                text: `MCP error -32602: limit expected <= 50 (${FILE_TEST_TOKEN})`,
               },
             ],
           },
