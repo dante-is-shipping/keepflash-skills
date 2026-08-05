@@ -98,8 +98,32 @@ For short structured content, use `--markdown <text>`. The Markdown path maps:
 
 The note title is stored separately, so do not duplicate it as a top-level
 heading in Markdown. External Markdown images are saved as links rather than
-hot-linked image blocks. Markdown input is limited to 200,000 characters and
-the converted note to 200 blocks, including nested blocks.
+hot-linked image blocks. To embed a local image, upload it with purpose
+`note-block`, use an `attachment://` reference in Markdown, and bind that
+reference on `create`:
+
+```bash
+node scripts/keepflash.mjs upload-image \
+  --file <path-to-diagram.png> \
+  --purpose note-block \
+  --idempotency-key <stable-upload-key>
+
+# If the command returns uploadId "upload_123", note.md may contain:
+# ![Architecture diagram](attachment://architecture)
+node scripts/keepflash.mjs create \
+  --title "Architecture" \
+  --space <spaceId> \
+  --markdown-file <path-to-note.md> \
+  --attachment architecture=upload_123 \
+  --idempotency-key <stable-create-key>
+```
+
+`--attachment` is repeatable up to ten times. Refs use letters, digits, `.`,
+`_`, or `-`; each must be unique, declared exactly once, and referenced by an
+image in the Markdown. The uploaded purpose must be `note-block`.
+
+Markdown input is limited to 200,000 characters and the converted note to 200
+blocks, including nested blocks.
 
 Use `--body` only for intentionally plain paragraphs:
 
@@ -173,6 +197,54 @@ Add `--title <text>` only when the same block-level update also changes the titl
 Idempotency keys are retained as short-lived technical state. Reuse a key only to retry the exact same payload; use a new key when any argument changes.
 
 Successful update results include `appUrl`. Use that link when telling the user the update completed, and keep `noteId` internal.
+
+## `upload-image`
+
+```bash
+node scripts/keepflash.mjs upload-image \
+  --file <local-image-path> \
+  --purpose <image-note|note-block> \
+  --idempotency-key <stable-upload-key>
+```
+
+The client verifies the file signature, enforces the 5 MB limit, calculates
+SHA-256, calls `keepflash_prepare_image_upload`, and uploads the bytes directly
+to storage with the returned PUT URL and required headers. Supported formats
+are JPEG, PNG, WebP, GIF, and AVIF. The JSON result contains safe metadata and
+`uploadId`; it deliberately omits the signed upload URL.
+
+Use `image-note` only with `create-image-note`, and `note-block` only with a
+normal `create` attachment. Reservations expire after 15 minutes and are
+single-consumption. Reuse an upload idempotency key only for an identical file
+and purpose. The signed upload URL is a secret: never print, persist, cite, or
+return it to the user.
+
+Resolve `spaces` before uploading if creation may require the user to choose a
+destination, so the reservation does not expire while waiting.
+
+## `create-image-note`
+
+After `upload-image --purpose image-note` returns an `uploadId`:
+
+```bash
+node scripts/keepflash.mjs create-image-note \
+  --upload-id <uploadId> \
+  --title "System diagram" \
+  --description-markdown "Generated architecture overview." \
+  --space <spaceId> \
+  --idempotency-key <stable-create-key>
+```
+
+Maps to `keepflash_create_image_note`. It creates a note with type `IMAGE` and
+source `API`; the uploaded image is the locked first block and optional
+description Markdown is editable below it. `--source-url` is optional metadata,
+not an instruction for KeepFlash to fetch a remote image. If no title is given,
+the local filename without its extension is used.
+
+The server verifies object size, MIME type, and SHA-256 before atomically
+binding the upload to the new note. A hash-identical existing image note may
+return `status: "duplicate"`. Uploads are not supported by the `update` command
+in this phase.
 
 ## `asset-url`
 

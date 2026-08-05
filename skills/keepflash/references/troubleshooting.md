@@ -29,6 +29,9 @@ The client prints sanitized server error details for MCP tool and protocol error
 - `NOT_FOUND`: verify the note or asset id.
 - `FORBIDDEN`: the requested resource is outside the token scope.
 - `SPACE_REQUIRED`: ask the user to select one of the returned writable Spaces.
+- `UPLOAD_EXPIRED`: run `upload-image` again with a new upload idempotency key, then retry the create call with a new create key.
+- `UPLOAD_INTEGRITY_MISMATCH`: the stored bytes did not match the declared size, MIME signature, or SHA-256; upload the original local file again rather than reusing that reservation.
+- `UPLOAD_NOT_READY`: the upload is missing, has the wrong purpose, or was already consumed; prepare a new upload for the intended note type.
 - `NOTE_CHANGED`: the note changed after it was read; stop and ask whether to re-read and reapply the edit.
 - `BLOCK_CHANGED`: a targeted block or insertion anchor changed; stop and ask before rebasing.
 - `MCP_TOOL_ERROR`: use the displayed server detail to distinguish invalid input, scope, rate limiting, and server failures; report the failure without inventing a result.
@@ -38,3 +41,8 @@ For search, use a non-blank query and a limit from 1 to 50. For directory or tot
 When a write conflict includes `requiresUserConfirmation: true`, never retry automatically. After confirmation, read the note again and use a new idempotency key for the revised request.
 
 Do not print credentials or signed asset URLs while troubleshooting.
+
+If the direct PUT reports `IMAGE_UPLOAD_FAILED`, repeat `upload-image` with the
+same idempotency key only when the file and purpose are unchanged. The client
+will obtain another short-lived upload URL without exposing it. If the file or
+purpose changes, use a new key.

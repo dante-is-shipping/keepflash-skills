@@ -531,6 +531,123 @@ test("maps note creation to writable blocks and an idempotency key", () => {
   );
 });
 
+test("maps a prepared image upload to image-note creation", () => {
+  assert.deepEqual(
+    buildToolCall([
+      "create-image-note",
+      "--upload-id",
+      "upload-1",
+      "--title",
+      "System diagram",
+      "--description-markdown",
+      "Generated architecture overview.",
+      "--space",
+      "space-1",
+      "--idempotency-key",
+      "create-image-note-1",
+    ]),
+    {
+      toolName: "keepflash_create_image_note",
+      arguments: {
+        uploadId: "upload-1",
+        title: "System diagram",
+        descriptionMarkdown: "Generated architecture overview.",
+        spaceId: "space-1",
+        idempotencyKey: "create-image-note-1",
+      },
+    },
+  );
+});
+
+test("maps attachment references into ordinary note creation", () => {
+  assert.deepEqual(
+    buildToolCall([
+      "create",
+      "--title",
+      "Architecture notes",
+      "--markdown",
+      "![Diagram](attachment://diagram)",
+      "--attachment",
+      "diagram=upload-1",
+      "--idempotency-key",
+      "create-note-with-image-1",
+    ]),
+    {
+      toolName: "keepflash_create_note",
+      arguments: {
+        title: "Architecture notes",
+        markdown: "![Diagram](attachment://diagram)",
+        attachments: [{ ref: "diagram", uploadId: "upload-1" }],
+        idempotencyKey: "create-note-with-image-1",
+      },
+    },
+  );
+});
+
+test("uploads a local image through a secret presigned URL and returns only upload metadata", async () => {
+  const imported = await import("../scripts/keepflash.mjs");
+  if (typeof imported.uploadImageFile !== "function") {
+    assert.fail("KeepFlash Skill should upload local image files");
+  }
+  const { uploadImageFile } = imported;
+  await withTempConfig(async (directory) => {
+    const imagePath = path.join(directory, "diagram.png");
+    const bytes = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02,
+    ]);
+    await writeFile(imagePath, bytes);
+    const toolCalls = [];
+    const fetchCalls = [];
+    const credential = {
+      token: "kf_mcp_live_secret",
+      baseUrl: "https://keepflash.example",
+      source: "file",
+    };
+
+    const result = await uploadImageFile(
+      {
+        filePath: imagePath,
+        purpose: "note_block",
+        idempotencyKey: "upload-diagram-1",
+      },
+      {
+        resolveCredential: async () => credential,
+        callTool: async (toolName, args, receivedCredential) => {
+          toolCalls.push({ toolName, args, credential: receivedCredential });
+          return {
+            uploadId: "upload_1",
+            uploadUrl: "https://storage.example/upload?secret=1",
+            requiredHeaders: { "Content-Type": "image/png" },
+          };
+        },
+        fetch: async (url, options) => {
+          fetchCalls.push({ url: String(url), options });
+          return new Response(null, { status: 200 });
+        },
+      },
+    );
+
+    assert.equal(toolCalls[0]?.toolName, "keepflash_prepare_image_upload");
+    assert.equal(toolCalls[0]?.credential, credential);
+    assert.equal(toolCalls[0]?.args.fileName, "diagram.png");
+    assert.equal(toolCalls[0]?.args.mimeType, "image/png");
+    assert.equal(toolCalls[0]?.args.sizeBytes, bytes.length);
+    assert.match(toolCalls[0]?.args.sha256, /^[a-f0-9]{64}$/);
+    assert.equal(fetchCalls[0]?.url, "https://storage.example/upload?secret=1");
+    assert.equal(fetchCalls[0]?.options.method, "PUT");
+    assert.deepEqual(Buffer.from(fetchCalls[0]?.options.body), bytes);
+    assert.deepEqual(result, {
+      status: "uploaded",
+      uploadId: "upload_1",
+      fileName: "diagram.png",
+      mimeType: "image/png",
+      sizeBytes: bytes.length,
+      sha256: toolCalls[0]?.args.sha256,
+    });
+    assert.doesNotMatch(JSON.stringify(result), /secret=1/);
+  });
+});
+
 test("maps structured note creation to Markdown without flattening it into paragraphs", async () => {
   await withTempConfig(async (directory) => {
     const markdownPath = path.join(directory, "field-guide.md");
@@ -683,6 +800,10 @@ test("Skill instructions define safe activation, citations, and automatic author
   assert.match(skill, /list --limit/i);
   assert.match(skill, /directory|catalog|有哪些笔记/i);
   assert.match(skill, /Do not use a blank query/i);
+  assert.match(skill, /upload-image/);
+  assert.match(skill, /create-image-note/);
+  assert.match(skill, /attachment:\/\//);
+  assert.match(skill, /upload URL.*secret|signed upload URL.*secret/i);
   assert.match(setup, /auth", "login"/);
   assert.equal(evals.skill_name, "keepflash");
   assert.equal(evals.evals.length >= 12, true);

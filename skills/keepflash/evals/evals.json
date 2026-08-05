@@ -119,6 +119,36 @@
         "The sentence is preserved exactly as one plain paragraph.",
         "No decorative heading, list, task, quote, or emphasis is invented."
       ]
+    },
+    {
+      "id": 18,
+      "prompt": "Generate a clean architecture diagram for my project and save it as a dedicated image note in my KeepFlash Research Space with a one-paragraph description.",
+      "expected_output": "Generates the image locally, resolves the Research Space, uploads it with purpose image-note, creates it with keepflash_create_image_note, and returns the created note as an appUrl title link without exposing the signed upload URL.",
+      "files": [],
+      "expectations": [
+        "The image is generated before upload and the generated local file path is used by upload-image.",
+        "The upload and create calls use separate stable idempotency keys.",
+        "The description is supplied as description Markdown below the locked image block.",
+        "No access token, upload URL, or internal note id is shown to the user."
+      ]
+    },
+    {
+      "id": 19,
+      "prompt": "Create a normal KeepFlash note from this Markdown report and place the two local diagrams at their existing positions in the document.",
+      "expected_output": "Uploads each local image with purpose note-block, replaces the Markdown image targets with distinct attachment:// refs, binds both ref=uploadId pairs on keepflash_create_note, and preserves the rest of the Markdown structure.",
+      "files": [],
+      "expectations": [
+        "Each local image gets one unique attachment ref and upload reservation.",
+        "Every declared attachment is used exactly once in the Markdown.",
+        "The final create call contains both attachment bindings and one stable create idempotency key.",
+        "The agent does not put base64 image bytes or signed upload URLs into MCP JSON."
+      ]
+    },
+    {
+      "id": 20,
+      "prompt": "Make an image note in KeepFlash, but I have several writable Spaces and did not say which one.",
+      "expected_output": "Lists writable Spaces and asks the user to choose before generating or uploading the image, avoiding an expiring orphan reservation while waiting.",
+      "files": []
     }
   ]
 }

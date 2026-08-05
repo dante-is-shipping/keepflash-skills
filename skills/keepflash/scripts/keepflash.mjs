@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn as nodeSpawn } from "node:child_process";
+import crypto from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -482,6 +483,91 @@ export async function callToolWithAuthorizationRetry(
   return performToolCall(toolName, argumentsValue, refreshedCredential);
 }
 
+export async function uploadImageFile(input, dependencies = {}) {
+  const filePath = path.resolve(requiredInputText(input?.filePath, "filePath"));
+  const purpose = normalizeUploadPurpose(input?.purpose);
+  const idempotencyKey = requiredInputText(
+    input?.idempotencyKey,
+    "idempotencyKey",
+  );
+  let bytes;
+
+  try {
+    bytes = await readFile(filePath);
+  } catch (error) {
+    throw new KeepFlashCliError("INVALID_ARGUMENTS", {
+      details: `Unable to read image file: ${error?.code ?? "unknown error"}.`,
+    });
+  }
+
+  const maximumBytes = 5 * 1024 * 1024;
+  if (bytes.length === 0 || bytes.length > maximumBytes) {
+    throw new KeepFlashCliError("INVALID_ARGUMENTS", {
+      details: "Image files must be between 1 byte and 5 MB.",
+    });
+  }
+
+  const mimeType = detectImageMimeType(bytes);
+  if (!mimeType) {
+    throw new KeepFlashCliError("INVALID_ARGUMENTS", {
+      details: "Image must be JPEG, PNG, WebP, GIF, or AVIF.",
+    });
+  }
+
+  const fileName = path.basename(filePath);
+  const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+  const prepared = await callToolWithAuthorizationRetry(
+    "keepflash_prepare_image_upload",
+    {
+      purpose,
+      fileName,
+      mimeType,
+      sizeBytes: bytes.length,
+      sha256,
+      idempotencyKey,
+    },
+    dependencies,
+  );
+
+  if (
+    typeof prepared?.uploadId !== "string" ||
+    typeof prepared?.uploadUrl !== "string"
+  ) {
+    throw new KeepFlashCliError("INVALID_MCP_RESPONSE");
+  }
+
+  let uploadUrl;
+  try {
+    uploadUrl = new URL(prepared.uploadUrl);
+  } catch {
+    throw new KeepFlashCliError("INVALID_MCP_RESPONSE");
+  }
+  if (!["http:", "https:"].includes(uploadUrl.protocol)) {
+    throw new KeepFlashCliError("INVALID_MCP_RESPONSE");
+  }
+
+  const fetchImpl = dependencies.fetch ?? globalThis.fetch;
+  const uploaded = await fetchImpl(uploadUrl, {
+    method: "PUT",
+    headers: normalizeUploadHeaders(prepared.requiredHeaders, mimeType),
+    body: bytes,
+  });
+  if (!uploaded.ok) {
+    throw new KeepFlashCliError("IMAGE_UPLOAD_FAILED", {
+      status: uploaded.status,
+    });
+  }
+
+  return {
+    status: "uploaded",
+    uploadId: prepared.uploadId,
+    fileName,
+    mimeType,
+    sizeBytes: bytes.length,
+    sha256,
+  };
+}
+
 export function buildToolCall(argv) {
   const [command, ...rest] = argv;
   const flags = parseFlags(rest);
@@ -572,6 +658,21 @@ export function buildToolCall(argv) {
         spaceId: stringFlag(flags, "space"),
         markdown: markdownContent,
         blocks,
+        attachments: attachmentFlags(flags),
+        idempotencyKey: requiredFlag(flags, "idempotency-key"),
+      }),
+    };
+  }
+
+  if (command === "create-image-note") {
+    return {
+      toolName: "keepflash_create_image_note",
+      arguments: compactObject({
+        uploadId: requiredFlag(flags, "upload-id"),
+        title: stringFlag(flags, "title"),
+        descriptionMarkdown: stringFlag(flags, "description-markdown"),
+        spaceId: stringFlag(flags, "space"),
+        sourceUrl: stringFlag(flags, "source-url"),
         idempotencyKey: requiredFlag(flags, "idempotency-key"),
       }),
     };
@@ -644,6 +745,19 @@ export async function main(argv, dependencies = {}) {
         2,
       ),
     );
+    return;
+  }
+  if (command === "upload-image") {
+    const flags = parseFlags(argv.slice(1));
+    const result = await uploadImageFile(
+      {
+        filePath: requiredFlag(flags, "file"),
+        purpose: requiredFlag(flags, "purpose"),
+        idempotencyKey: requiredFlag(flags, "idempotency-key"),
+      },
+      dependencies,
+    );
+    write(JSON.stringify(result, null, 2));
     return;
   }
 
@@ -719,6 +833,71 @@ function nonNegativeNumber(value, fallback) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : fallback;
+}
+
+function requiredInputText(value, name) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new KeepFlashCliError("INVALID_ARGUMENTS", {
+      details: `${name} is required.`,
+    });
+  }
+  return value.trim();
+}
+
+function normalizeUploadPurpose(value) {
+  const normalized = requiredInputText(value, "purpose").replaceAll("-", "_");
+  if (!["image_note", "note_block"].includes(normalized)) {
+    throw new KeepFlashCliError("INVALID_ARGUMENTS", {
+      details: "--purpose must be image-note or note-block.",
+    });
+  }
+  return normalized;
+}
+
+function detectImageMimeType(bytes) {
+  if (
+    bytes.length >= 8 &&
+    bytes.subarray(0, 8).equals(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    )
+  ) {
+    return "image/png";
+  }
+  if (
+    bytes.length >= 3 &&
+    bytes[0] === 0xff &&
+    bytes[1] === 0xd8 &&
+    bytes[2] === 0xff
+  ) {
+    return "image/jpeg";
+  }
+  const header = bytes.subarray(0, 12).toString("ascii");
+  if (header.startsWith("GIF87a") || header.startsWith("GIF89a")) {
+    return "image/gif";
+  }
+  if (header.startsWith("RIFF") && header.slice(8, 12) === "WEBP") {
+    return "image/webp";
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes.subarray(4, 8).toString("ascii") === "ftyp" &&
+    ["avif", "avis"].includes(bytes.subarray(8, 12).toString("ascii"))
+  ) {
+    return "image/avif";
+  }
+  return undefined;
+}
+
+function normalizeUploadHeaders(value, mimeType) {
+  if (value === undefined) return { "Content-Type": mimeType };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new KeepFlashCliError("INVALID_MCP_RESPONSE");
+  }
+  const entries = Object.entries(value);
+  if (entries.some(([, item]) => typeof item !== "string")) {
+    throw new KeepFlashCliError("INVALID_MCP_RESPONSE");
+  }
+  return Object.fromEntries(entries);
 }
 
 function delay(milliseconds) {
@@ -859,6 +1038,25 @@ function arrayFlag(flags, name) {
   return Array.isArray(value) ? value : [value];
 }
 
+function attachmentFlags(flags) {
+  const values = arrayFlag(flags, "attachment");
+  if (!values) return undefined;
+
+  const seen = new Set();
+  return values.map((value) => {
+    const separator = typeof value === "string" ? value.indexOf("=") : -1;
+    const ref = separator > 0 ? value.slice(0, separator).trim() : "";
+    const uploadId = separator > 0 ? value.slice(separator + 1).trim() : "";
+    if (!/^[A-Za-z0-9._-]{1,100}$/.test(ref) || !uploadId || seen.has(ref)) {
+      throw new KeepFlashCliError("INVALID_ARGUMENTS", {
+        details: "Each --attachment must be a unique ref=uploadId pair.",
+      });
+    }
+    seen.add(ref);
+    return { ref, uploadId };
+  });
+}
+
 function booleanFlag(flags, name) {
   return flags.get(name) === true ? true : undefined;
 }
@@ -896,7 +1094,9 @@ function usage() {
     "  list [--limit <1-50>] [--cursor <cursor>] [--space <id>] [--type <type>]",
     "  read --id <noteId> [--images]",
     "  spaces",
+    "  upload-image --file <path> --purpose <image-note|note-block> --idempotency-key <key>",
     "  create --title <text> [--space <id>] [--body <text> | --markdown <text> | --markdown-file <path> | --blocks-json <json>] --idempotency-key <key>",
+    "  create-image-note --upload-id <uploadId> [--title <text>] [--description-markdown <text>] [--space <id>] --idempotency-key <key>",
     "  update --id <noteId> --base-revision <number> --operations-json <json> --idempotency-key <key>",
     "  asset-url --id <assetId>",
   ].join("\n");
